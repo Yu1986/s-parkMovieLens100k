@@ -10,9 +10,6 @@ import scala.Tuple2;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.api.java.function.Function;
-import org.apache.spark.api.java.function.Function2;
-import org.apache.spark.api.java.function.PairFunction;
 import org.apache.spark.api.java.function.VoidFunction;
 
 public class MovielensRating {
@@ -26,15 +23,14 @@ public class MovielensRating {
 	private static ConcurrentHashMap<Integer, Tuple2<String, Integer>> movieMap = new ConcurrentHashMap<Integer, Tuple2<String, Integer>>();
 	private static void buildMovieItemMap(JavaSparkContext sc) {
 		
-		PairFunction<String, Integer, Tuple2<String, Integer>> funcUItemMapStringToPair = new PairFunction<String, Integer, Tuple2<String, Integer>>() {
-			private static final long serialVersionUID = 5710558142767390832L;
-			@Override
-			public Tuple2<Integer, Tuple2<String, Integer>> call(String s) throws Exception {
+		// put movie items to hashmap: movie id -> (movie name, genre)
+		sc.textFile(U_ITEM_FILE_NAME).cache()
+			.mapToPair((s) -> {
 				String[] split = s.split("\\|");
 				if (split.length == 24) {
 					int genre = 0;
 					int mask = 0x01 << 18;
-					for (int i = 5; i < 24; i++) {
+					for (int i = 5; i < 24; i++) { // use an integer to represents genre, 
 						if (split[i].compareTo("1") == 0) {
 							genre |= mask;
 						}
@@ -45,12 +41,7 @@ public class MovielensRating {
 				} else {
 					return null;
 				}
-			}
-		};
-		
-		// put movie items to hashmap: movie id -> (movie name, genre)
-		sc.textFile(U_ITEM_FILE_NAME).cache()
-			.mapToPair(funcUItemMapStringToPair)
+			})
 			.foreach(new VoidFunction<Tuple2<Integer, Tuple2<String, Integer>>>() {
 				private static final long serialVersionUID = 8718157298955820977L;
 	
@@ -79,36 +70,28 @@ public class MovielensRating {
 	}
 	
 	public static void task2a(JavaSparkContext sc) {
-		
-		Function<String, Boolean> funcReduceByRate = new Function<String, Boolean>() {
-			private static final long serialVersionUID = 7104835396397142491L;
-			public Boolean call(String s) {
-				int lastTab = s.lastIndexOf('\t');
-				char a = s.charAt(lastTab - 1);
-				if ((a - '0') >= 3) {
-					return true;
-				}
-				return false;
-			}
-		};
-		
-		Function<String, Tuple3<Integer, Integer, Integer>> funcMapStringToTuple = new Function<String, Tuple3<Integer, Integer, Integer>>() {
-			private static final long serialVersionUID = -8768343458872074743L;
-			public Tuple3<Integer, Integer, Integer> call(String s) throws Exception {
-				String[] split = s.split("\\t");
-				if (split.length == 4) {
-					return new Tuple3<Integer, Integer, Integer>(Integer.parseInt(split[0]), Integer.parseInt(split[1]),
-							Integer.parseInt(split[2]));
-				}
-				return null;
-			}
-		};
 
 		JavaRDD<Tuple3<Integer, Integer, Integer>> rddMovie = sc.textFile(U_DATA_FILE_NAME).cache()
-				.filter(funcReduceByRate)
-				.map(funcMapStringToTuple);
+				.filter((s)->{ // filter by rate, only return items whose rate is great or equal than 3
+					int lastTab = s.lastIndexOf('\t');
+					char a = s.charAt(lastTab - 1);
+					if ((a - '0') >= 3) {
+						return true;
+					} else {
+						return false;
+					}
+				})
+				.map((s)-> { // map result to Tuple3(Int,int,int): (user id, movie item id, rate)
+					String[] split = s.split("\\t");
+					if (split.length == 4) {
+						return new Tuple3<Integer, Integer, Integer>(Integer.parseInt(split[0]), Integer.parseInt(split[1]),
+								Integer.parseInt(split[2]));
+					} else {
+						return null;
+					}
+				});
 
-		rddMovie.foreach(new VoidFunction<Tuple3<Integer, Integer, Integer>>() {
+		rddMovie.foreach(new VoidFunction<Tuple3<Integer, Integer, Integer>>() { // show the result
 			private static final long serialVersionUID = 4808288099402040078L;
 
 			public void call(Tuple3<Integer, Integer, Integer> moviePair) throws Exception {
@@ -122,40 +105,29 @@ public class MovielensRating {
 	}
 	
 	public static void task2b(JavaSparkContext sc) {
-		
-		PairFunction<String, Integer, ArrayList<Tuple2<Integer, Integer>>> funcUDataMapStringToPair = new PairFunction<String, Integer, ArrayList<Tuple2<Integer, Integer>>>() {
-			private static final long serialVersionUID = -8626065452212102037L;
-			public Tuple2<Integer, ArrayList<Tuple2<Integer, Integer>>> call(String s) throws Exception {
-				String[] split = s.split("\\t");
-				if (split.length == 4) {
-					ArrayList<Tuple2<Integer, Integer>> list = new ArrayList<Tuple2<Integer, Integer>>();
-					list.add(new Tuple2<Integer, Integer>(Integer.parseInt(split[1]), Integer.parseInt(split[2])));
-					return new Tuple2<Integer, ArrayList<Tuple2<Integer, Integer>>>(Integer.parseInt(split[0]), list);
-				} else {
-					return null;
-				}
-			}
-		};
-		
-		Function2<ArrayList<Tuple2<Integer, Integer>>, ArrayList<Tuple2<Integer, Integer>>, ArrayList<Tuple2<Integer, Integer>>> funcUDataReduceByUser = new Function2<ArrayList<Tuple2<Integer, Integer>>, ArrayList<Tuple2<Integer, Integer>>, ArrayList<Tuple2<Integer, Integer>>>() {
-			private static final long serialVersionUID = 244629745426016123L;
 
-			public ArrayList<Tuple2<Integer, Integer>> call(ArrayList<Tuple2<Integer, Integer>> a,
-					ArrayList<Tuple2<Integer, Integer>> b) throws Exception {
-				ArrayList<Tuple2<Integer, Integer>> result = new ArrayList<Tuple2<Integer, Integer>>();
-				result.addAll(a);
-				result.addAll(b);
-				return result;
-			}
-		};
-
+		// generate user id - movie pairs
 		// user id -> the list of liked movies(the id of movie, rate)
 		JavaPairRDD<Integer, ArrayList<Tuple2<Integer, Integer>>> rddUserMoviePair = 
 				sc.textFile(U_DATA_FILE_NAME).cache()
-				.mapToPair(funcUDataMapStringToPair)
-				.reduceByKey(funcUDataReduceByUser);
+				.mapToPair((s)->{ // generate user->movie pairs
+					String[] split = s.split("\\t");
+					if (split.length == 4) {
+						ArrayList<Tuple2<Integer, Integer>> list = new ArrayList<Tuple2<Integer, Integer>>();
+						list.add(new Tuple2<Integer, Integer>(Integer.parseInt(split[1]), Integer.parseInt(split[2])));
+						return new Tuple2<Integer, ArrayList<Tuple2<Integer, Integer>>>(Integer.parseInt(split[0]), list);
+					} else {
+						return null;
+					}
+				})
+				.reduceByKey((a,b)->{ // reduce item by the same user id, generates the list of moved liked by the user
+					ArrayList<Tuple2<Integer, Integer>> result = new ArrayList<Tuple2<Integer, Integer>>();
+					result.addAll(a);
+					result.addAll(b);
+					return result;
+				});
 
-		// print result in foreach function
+		// print result
 		rddUserMoviePair.foreach(new VoidFunction<Tuple2<Integer, ArrayList<Tuple2<Integer, Integer>>>>() {
 			private static final long serialVersionUID = -911923315201173291L;
 
@@ -176,31 +148,20 @@ public class MovielensRating {
 	
 	private static int genreIndex;
 	public static void task2c(JavaSparkContext sc) {
-		PairFunction<String, Integer, Integer> funcUdataMapStringToMoviePair = new PairFunction<String, Integer, Integer>(){
-			private static final long serialVersionUID = -5077794879811424073L;
-				@Override
-				public Tuple2<Integer, Integer> call(String s) throws Exception {
-					String[] split = s.split("\\t");
-					if (split.length == 4) {
-						return new Tuple2<Integer, Integer>(Integer.parseInt(split[1]), 1);
-					} else {
-						return null;
-					}
-				}
-		};	
 		
-		PairFunction<Tuple2<Integer, Integer>, Integer, Integer> funcSwap = new PairFunction<Tuple2<Integer, Integer>, Integer, Integer>(){
-			private static final long serialVersionUID = 4306356428638205489L;
-			@Override
-			public Tuple2<Integer, Integer> call(Tuple2<Integer, Integer> item) throws Exception {
-				return item.swap();
-			}
-		};
-		
-		// movie id -> how many likes by users
 		JavaPairRDD<Integer, Integer> rddMovieLikeCnt = sc.textFile(U_DATA_FILE_NAME).cache()
-		.mapToPair(funcUdataMapStringToMoviePair)
-		.reduceByKey((a,b)->{return a+b;}).mapToPair(funcSwap).sortByKey(false).mapToPair(funcSwap);
+		.mapToPair((s)->{
+			String[] split = s.split("\\t");
+			if (split.length == 4) {
+				return new Tuple2<Integer, Integer>(Integer.parseInt(split[1]), 1);
+			} else {
+				return null;
+			}
+		}) // parse string to movie id -> liked counter
+		.reduceByKey((a,b)->{return a+b;}) // count how many likes for each movies
+		.mapToPair((t)->{return t.swap();}) // swap to likes->movie
+		.sortByKey(false) 					// sort by likes
+		.mapToPair((t)->{return t.swap();}); // swap back to movie->likes
 		
 		JavaPairRDD<Integer, Integer>[] rddGenreMovieLikeCnt = new JavaPairRDD[19];
 		

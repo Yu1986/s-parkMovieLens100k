@@ -1,12 +1,10 @@
 package com.yujie.movielens;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.spark.SparkConf;
 import scala.Tuple3;
-import scala.collection.immutable.List;
 import scala.Tuple2;
 
 import org.apache.spark.api.java.JavaPairRDD;
@@ -18,10 +16,15 @@ import org.apache.spark.api.java.function.PairFunction;
 import org.apache.spark.api.java.function.VoidFunction;
 
 public class MovielensRating {
-
+	
+	private final static String U_DATA_FILE_NAME = "ml-100k/u.data";
+	private final static String U_ITEM_FILE_NAME = "ml-100k/u.item";
+	private final static String U_GENRE_FILE_NAME = "ml-100k/u.genre";
+	
+	// movie id -> (movie name, genre)
+	// genre[18:0] reprents the genre for the movie
 	private static ConcurrentHashMap<Integer, Tuple2<String, Integer>> movieMap = new ConcurrentHashMap<Integer, Tuple2<String, Integer>>();
 	private static void buildMovieItemMap(JavaSparkContext sc) {
-		String uItemFile = "ml-100k/u.item";
 		
 		PairFunction<String, Integer, Tuple2<String, Integer>> funcUItemMapStringToPair = new PairFunction<String, Integer, Tuple2<String, Integer>>() {
 			private static final long serialVersionUID = 5710558142767390832L;
@@ -44,9 +47,9 @@ public class MovielensRating {
 				}
 			}
 		};
-
+		
 		// put movie items to hashmap: movie id -> (movie name, genre)
-		sc.textFile(uItemFile).cache()
+		sc.textFile(U_ITEM_FILE_NAME).cache()
 			.mapToPair(funcUItemMapStringToPair)
 			.foreach(new VoidFunction<Tuple2<Integer, Tuple2<String, Integer>>>() {
 				private static final long serialVersionUID = 8718157298955820977L;
@@ -58,8 +61,24 @@ public class MovielensRating {
 			});
 	}
 	
+	private static  String[] genreName = new String[19];
+	private static void buildGenreName(JavaSparkContext sc) {
+		sc.textFile(U_GENRE_FILE_NAME).cache()
+		.filter((s)->{if(s.length()<2) return false; else return true;})
+		.mapToPair((s)->{
+			String[] split = s.split("\\|");
+			if (split.length == 2) {
+				return new Tuple2<Integer, String>(Integer.parseInt(split[1]), split[0]);
+			} else {
+				return null;
+			}
+			})
+		.foreach((t)->{
+			genreName[t._1] = t._2;
+			});
+	}
+	
 	public static void task2a(JavaSparkContext sc) {
-		String uDataFile = "ml-100k/u.data";
 		
 		Function<String, Boolean> funcReduceByRate = new Function<String, Boolean>() {
 			private static final long serialVersionUID = 7104835396397142491L;
@@ -85,7 +104,7 @@ public class MovielensRating {
 			}
 		};
 
-		JavaRDD<Tuple3<Integer, Integer, Integer>> rddMovie = sc.textFile(uDataFile).cache()
+		JavaRDD<Tuple3<Integer, Integer, Integer>> rddMovie = sc.textFile(U_DATA_FILE_NAME).cache()
 				.filter(funcReduceByRate)
 				.map(funcMapStringToTuple);
 
@@ -103,9 +122,6 @@ public class MovielensRating {
 	}
 	
 	public static void task2b(JavaSparkContext sc) {
-		String uDataFile = "ml-100k/u.data";
-		
-		
 		
 		PairFunction<String, Integer, ArrayList<Tuple2<Integer, Integer>>> funcUDataMapStringToPair = new PairFunction<String, Integer, ArrayList<Tuple2<Integer, Integer>>>() {
 			private static final long serialVersionUID = -8626065452212102037L;
@@ -135,7 +151,7 @@ public class MovielensRating {
 
 		// user id -> the list of liked movies(the id of movie, rate)
 		JavaPairRDD<Integer, ArrayList<Tuple2<Integer, Integer>>> rddUserMoviePair = 
-				sc.textFile(uDataFile).cache()
+				sc.textFile(U_DATA_FILE_NAME).cache()
 				.mapToPair(funcUDataMapStringToPair)
 				.reduceByKey(funcUDataReduceByUser);
 
@@ -146,7 +162,7 @@ public class MovielensRating {
 			public void call(Tuple2<Integer, ArrayList<Tuple2<Integer, Integer>>> item) throws Exception {
 				System.out.println("user id: " + item._1);
 				item._2.forEach((t) -> {
-					System.out.println("  |- loved movies: " + "movie: " + t._1 + "/" + movieMap.get(t._1)._1 + ", "
+					System.out.println("  |- loved movies: " + t._1 + "/" + movieMap.get(t._1)._1 + ", "
 							+ "rate: " + t._2);
 				});
 			}
@@ -158,8 +174,54 @@ public class MovielensRating {
 		
 	}
 	
+	private static int genreIndex;
 	public static void task2c(JavaSparkContext sc) {
+		PairFunction<String, Integer, Integer> funcUdataMapStringToMoviePair = new PairFunction<String, Integer, Integer>(){
+			private static final long serialVersionUID = -5077794879811424073L;
+				@Override
+				public Tuple2<Integer, Integer> call(String s) throws Exception {
+					String[] split = s.split("\\t");
+					if (split.length == 4) {
+						return new Tuple2<Integer, Integer>(Integer.parseInt(split[1]), 1);
+					} else {
+						return null;
+					}
+				}
+		};	
 		
+		PairFunction<Tuple2<Integer, Integer>, Integer, Integer> funcSwap = new PairFunction<Tuple2<Integer, Integer>, Integer, Integer>(){
+			private static final long serialVersionUID = 4306356428638205489L;
+			@Override
+			public Tuple2<Integer, Integer> call(Tuple2<Integer, Integer> item) throws Exception {
+				return item.swap();
+			}
+		};
+		
+		// movie id -> how many likes by users
+		JavaPairRDD<Integer, Integer> rddMovieLikeCnt = sc.textFile(U_DATA_FILE_NAME).cache()
+		.mapToPair(funcUdataMapStringToMoviePair)
+		.reduceByKey((a,b)->{return a+b;}).mapToPair(funcSwap).sortByKey(false).mapToPair(funcSwap);
+		
+		JavaPairRDD<Integer, Integer>[] rddGenreMovieLikeCnt = new JavaPairRDD[19];
+		
+		for (genreIndex=0; genreIndex<19; genreIndex++) {
+			rddGenreMovieLikeCnt[genreIndex] = rddMovieLikeCnt.filter((t)->{
+				int mask = 0x01 << 18;
+				if ((movieMap.get(t._1)._2 & (mask>>genreIndex)) != 0) {
+					return true;
+				} else {
+					return false;
+				}
+			});
+			rddGenreMovieLikeCnt[genreIndex]
+				.take(10)
+				.forEach((t) -> {System.out.println(
+						genreName[genreIndex] + ":" + 
+						"(" + movieMap.get(t._1)._1 + "/" + t._1 + ")" + 
+						", " + "liked by " + t._2 + "users"
+						);});
+		}
+
 	}
 
 	public static void main(String[] args) {
@@ -167,9 +229,21 @@ public class MovielensRating {
 		JavaSparkContext sc = new JavaSparkContext(conf);
 		
 		buildMovieItemMap(sc);
+		buildGenreName(sc);
 		
+		System.out.println("===============================");
+		System.out.println("             2a");
+		System.out.println("===============================");
 		task2a(sc);
+		
+		System.out.println("===============================");
+		System.out.println("             2b");
+		System.out.println("===============================");
 		task2b(sc);
+		
+		System.out.println("===============================");
+		System.out.println("             2c");
+		System.out.println("===============================");
 		task2c(sc);
 		
 		sc.close();
